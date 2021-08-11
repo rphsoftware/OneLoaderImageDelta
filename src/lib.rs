@@ -59,7 +59,7 @@ pub fn apply_diff(source: Vec<u32>, diff_stream: Vec<u8>) -> Vec<u32> {
         if (bitmap[i / 8] >> (i % 8)) & 0x1 == 1 {
             if diff_stream.len() < (diff_stream_ptr + 4) { panic!("Diff stream truncated"); }
             result[i] = {
-                let mut result = ((diff_stream[diff_stream_ptr] as u32) << 24);
+                let mut result = (diff_stream[diff_stream_ptr] as u32) << 24;
                 result = result + ((diff_stream[diff_stream_ptr + 1] as u32) << 16);
                 result = result + ((diff_stream[diff_stream_ptr + 2] as u32) << 8);
                 result = result + (diff_stream[diff_stream_ptr + 3] as u32);
