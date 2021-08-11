@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>ImgDiffGen</title>
+</head>
+<body>
+<div style="display: none" id="loaded">
+    <h1>Image diff generator</h1>
+    <h3>Source file</h3>
+    <input type="file" id="src" accept="image/png">
+    <h3>Target file</h3>
+    <input type="file" id="tgt" accept="image/png">
+    <button>Process</button>
+</div>
+<div id="loading">
+    <h1>Loading, please wait</h1>
+</div>
+    <script src="pako.min.js"></script>
+    <script type="module">
+        import {default as loadwasm, create_diff, apply_diff, tile_size} from './pkg/imagediff2.js';
+        loadwasm().then(a => {
+            document.querySelector("#loading").remove();
+            document.querySelector("#loaded").style.display = "block";
+            e = tile_size();
+        });
+
+        let e;
+
+        function imgToCanvas(img) {
+            let width = Math.ceil(img.width / e) * e;
+            let height = Math.ceil(img.height / e) * e;
+
+            let canvas = document.createElement("canvas");
+            canvas.width = width;
+            canvas.height = height;
+
+            let ctx = canvas.getContext("2d");
+            ctx.drawImage(img, 0, 0);
+
+            return ctx;
+        }
+
+        async function generate_diff() {
+            const sourceURL = URL.createObjectURL(document.getElementById('src').files[0]);
+            const targetURL = URL.createObjectURL(document.getElementById('tgt').files[0]);
+
+            const [
+                sourceImg,
+                targetImg
+            ] = await Promise.all([
+                new Promise(resolve => {const img = new Image();img.onload = () => resolve(img);img.src = sourceURL;}),
+                new Promise(resolve => {const img = new Image();img.onload = () => resolve(img);img.src = targetURL;})
+            ]);
+
+            const source = imgToCanvas(sourceImg);
+            const target = imgToCanvas(targetImg);
+
+            URL.revokeObjectURL(sourceURL);
+            URL.revokeObjectURL(targetURL);
+
+            let segments = [];
+
+            console.log("Diffing");
+            console.time("Diff");
+            for (let x = 0; x < Math.ceil(targetImg.width / e); x++) {
+                for (let y = 0; y < Math.ceil(targetImg.height / e); y++) {
+                    let sourceBitmap;
+                    if (sourceImg.width < (x * e) || sourceImg.height < (y * e)) {
+                        sourceBitmap = new ArrayBuffer(e*e*4);
+                    } else {
+                        sourceBitmap = source.getImageData(x * e, y * e, e, e).data.buffer;
+                    }
+
+                    let targetBitmap = target.getImageData(x * e, y * e, e, e).data.buffer;
+
+                    let diff = create_diff(new Uint32Array(sourceBitmap), new Uint32Array(targetBitmap));
+                    if (diff.byteLength > Math.floor((e * e) / 8)) {
+                        let targetData = new ArrayBuffer(8 + diff.byteLength); // 2 - x, 2 - y, 4 - len
+                        let view = new DataView(targetData);
+                        view.setUint16(0, x);
+                        view.setUint16(2, y);
+                        view.setUint32(4, diff.byteLength);
+                        let targetArr = new Uint8Array(targetData);
+                        targetArr.set(diff, 8);
+
+                        segments.push(targetArr);
+                    }
+                }
+            }
+            console.timeEnd("Diff");
+
+            console.time("compress");
+            let totalLen = segments.reduce((a, b)=>a+b.byteLength, 0);
+            let uncompressed = new Uint8Array(new ArrayBuffer(totalLen));
+            let ptr = 0;
+            for (let block of segments) {
+                uncompressed.set(block, ptr);
+                ptr += block.byteLength;
+            }
+            let compressed = pako.deflate(uncompressed);
+            console.timeEnd("compress");
+
+            let randomBytes = new ArrayBuffer(8);
+            let randomBytesDV = new DataView(randomBytes);
+            for (let i = 0; i < 8; i++) {
+                randomBytesDV.setUint8(i, Math.floor(Math.random() * 256));
+            }
+
+            let output = new ArrayBuffer(6 + 4 + 4 + 8 + 4 + compressed.byteLength);
+            let outputDv = new DataView(output);
+            let outputBuf = new Uint8Array(output);
+            outputDv.setUint32(0, 0xFEFFD808);
+            outputDv.setUint16(4, 0xDD21);
+            outputDv.setUint32(6, targetImg.width);
+            outputDv.setUint32(10, targetImg.height);
+            outputBuf.set(new Uint8Array(randomBytes), 14);
+            outputDv.setUint32(22, compressed.byteLength);
+            outputBuf.set(compressed, 26);
+
+            let result = new Blob([output], {type:"application/octet-stream"});
+            let resUrl = URL.createObjectURL(result);
+            let a = document.createElement("a");
+            a.href = resUrl;
+            a.download = "imagediff.olid";
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+        }
+
+        document.querySelector("button").addEventListener("click", generate_diff);
+    </script>
+</body>
+</html>

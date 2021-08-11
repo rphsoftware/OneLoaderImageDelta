@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>ImgDiffApplier</title>
+</head>
+<body>
+<div style="display: none" id="loaded">
+    <h1>Image diff applier</h1>
+    <h3>Source file</h3>
+    <input type="file" id="src" accept="image/png">
+    <h3>Delta</h3>
+    <input type="file" id="tgt" accept="*.olid">
+    <button>Process</button>
+</div>
+<div id="loading">
+    <h1>Loading, please wait</h1>
+</div>
+<script src="pako.min.js"></script>
+<script type="module">
+    import {default as loadwasm, create_diff, apply_diff, tile_size} from './pkg/imagediff2.js';
+    loadwasm().then(a => {
+        document.querySelector("#loading").remove();
+        document.querySelector("#loaded").style.display = "block";
+        e = tile_size();
+    });
+
+    let e;
+
+    function imgToCanvas(img) {
+        let width = Math.ceil(img.width / e) * e;
+        let height = Math.ceil(img.height / e) * e;
+
+        let canvas = document.createElement("canvas");
+        canvas.width = width;
+        canvas.height = height;
+
+        let ctx = canvas.getContext("2d");
+        ctx.drawImage(img, 0, 0);
+
+        return ctx;
+    }
+
+    async function generate_diff() {
+        const sourceURL = URL.createObjectURL(document.getElementById('src').files[0]);
+        const targetURL = URL.createObjectURL(document.getElementById('tgt').files[0]);
+
+        const sourceImg = await new Promise(resolve => {const img = new Image();img.onload = () => resolve(img);img.src = sourceURL;});
+        const source = imgToCanvas(sourceImg);
+
+        const delta = await fetch(targetURL).then(res=>res.arrayBuffer());
+        const deltaDV = new DataView(delta);
+        const deltaBuf = new Uint8Array(delta);
+
+        URL.revokeObjectURL(sourceURL);
+        URL.revokeObjectURL(targetURL);
+
+        console.log("Reading diff");
+        if (deltaDV.getUint32(0) !== 0xFEFFD808 || deltaDV.getUint16(4) !== 0xDD21) {
+            return alert("Invalid header");
+        }
+
+        let targetCanvas = document.createElement("canvas");
+        targetCanvas.width = Math.ceil(deltaDV.getUint32(6) / 16) * 16;
+        targetCanvas.height = Math.ceil(deltaDV.getUint32(10) / 16) * 16;
+        targetCanvas.getContext("2d").drawImage(source.canvas, 0, 0);
+
+        let targetContext = targetCanvas.getContext("2d");
+
+        let compressedBitstreamAB = delta.slice(26, deltaDV.getUint32(22) + 26);
+        let deltaBitstream = pako.inflate(new Uint8Array(compressedBitstreamAB));
+        let deltaBitstreamDV = new DataView(deltaBitstream.buffer);
+
+        let deltaBitstreamPtr = 0;
+
+        while (deltaBitstreamPtr < deltaBitstream.byteLength) {
+            let tileX = deltaBitstreamDV.getUint16(deltaBitstreamPtr);
+            let tileY = deltaBitstreamDV.getUint16(deltaBitstreamPtr + 2);
+            let tileBitstreamLen = deltaBitstreamDV.getUint32(deltaBitstreamPtr + 4);
+            deltaBitstreamPtr += 8;
+
+            let tileBitstream = deltaBitstream.buffer.slice(deltaBitstreamPtr, deltaBitstreamPtr + tileBitstreamLen);
+            deltaBitstreamPtr += tileBitstreamLen;
+
+            let sourceBitmap;
+            if (sourceImg.width < (tileX * e) || sourceImg.height < (tileY * e)) {
+                sourceBitmap = new ArrayBuffer(e*e*4);
+            } else {
+                sourceBitmap = source.getImageData(tileX * e, tileY * e, e, e).data.buffer;
+            }
+
+            let targetBitmap = apply_diff(new Uint32Array(sourceBitmap), new Uint8Array(tileBitstream));
+            let imgData = new ImageData(new Uint8ClampedArray(targetBitmap.buffer), e, e);
+
+            targetContext.putImageData(imgData, tileX * e, tileY * e);
+        }
+
+        // The image needs to be trimmed a bit
+        if (targetCanvas.width !== deltaDV.getUint32(6) || targetCanvas.height !== deltaDV.getUint32(10)) {
+            let fc = document.createElement("canvas");
+            fc.width = deltaDV.getUint32(6);
+            fc.height = deltaDV.getUint32(10);
+
+            fc.getContext("2d").drawImage(targetCanvas, 0, 0);
+
+            targetCanvas = fc;
+        }
+
+        let a = document.createElement("a");
+        a.href = targetCanvas.toDataURL("image/png");
+        a.download = "applied.png";
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+    }
+
+    document.querySelector("button").addEventListener("click", generate_diff);
+</script>
+</body>
+</html>
